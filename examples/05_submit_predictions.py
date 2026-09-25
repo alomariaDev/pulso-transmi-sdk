@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +36,8 @@ def predict_targets(
 ) -> list[dict[str, object]]:
     working_observations = observations.copy()
     working_context = context.copy()
+    context_columns = [column for column in context.columns if column != "observed_at"]
+    latest_context = context.sort_values("observed_at").iloc[-1].copy()
     values_by_key: dict[tuple[str, str], float] = {}
 
     target_times = sorted({target["target_at"] for target in targets})
@@ -44,12 +45,16 @@ def predict_targets(
         target_at = pd.Timestamp(target_at_text)
         targets_at = [target for target in targets if target["target_at"] == target_at_text]
         station_ids = [str(target["station_id"]) for target in targets_at]
+        target_context = pd.DataFrame(
+            [{"observed_at": target_at, **{column: latest_context[column] for column in context_columns}}]
+        )
+        context_for_prediction = pd.concat([working_context, target_context], ignore_index=True)
         target_rows = pd.DataFrame(
             {"observed_at": [target_at] * len(station_ids), "station_id": station_ids, "demand": [np.nan] * len(station_ids)}
         )
         featured = build_features(
             pd.concat([working_observations, target_rows], ignore_index=True),
-            working_context,
+            context_for_prediction,
         )
         prediction_rows = featured.loc[
             (featured["observed_at"] == target_at) & featured["station_id"].isin(station_ids)
@@ -65,6 +70,7 @@ def predict_targets(
         generated = target_rows.copy()
         generated["demand"] = values
         working_observations = pd.concat([working_observations, generated], ignore_index=True)
+        working_context = pd.concat([working_context, target_context], ignore_index=True)
 
     predictions = [
         {
@@ -80,7 +86,7 @@ def predict_targets(
     return predictions
 
 
-def main(expected_cycle_id: str | None = None) -> None:
+def main() -> None:
     load_env_file()
     api_key = os.environ.get("PULSO_API_KEY")
     if not api_key:
@@ -91,12 +97,6 @@ def main(expected_cycle_id: str | None = None) -> None:
         cycle_response = client.get("/v1/forecast-cycles/current")
         cycle_response.raise_for_status()
         cycle = cycle_response.json()
-
-        if expected_cycle_id is not None and cycle["cycle_id"] != expected_cycle_id:
-            raise RuntimeError(
-                "El ciclo actual cambió durante el procesamiento: "
-                f"se esperaba {expected_cycle_id}, la API devolvió {cycle['cycle_id']}"
-            )
 
         if cycle["state"] != "open":
             raise RuntimeError(f"El ciclo no está abierto: {cycle['state']}")
@@ -139,6 +139,4 @@ def main(expected_cycle_id: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 2:
-        raise SystemExit("Uso: python examples/05_submit_predictions.py [cycle_id]")
-    main(sys.argv[1] if len(sys.argv) == 2 else None)
+    main()
